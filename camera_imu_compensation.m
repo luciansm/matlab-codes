@@ -1,6 +1,5 @@
 clc; clear; close all;
 
-
 %Leitura dos dados do Labview (acelerômetro IEPE na tubulação e flag de ativação do laser)
 [filename, pathname] = uigetfile({'*.txt', 'Arquivos CSV/TXT (*.csv)'; '*.*', 'Todos os arquivos (*.*)'}, 'Selecione o arquivo');
 
@@ -17,11 +16,11 @@ fullpath = fullfile(pathname, filename);
 [data1] = readAndProcessCSV(fullpath);
 
 %Distância ao alvo 
-dist_alvo = 3990 * 0.8741; %em mm 
+dist_alvo = 3960 * 1.05; %em mm 
 Fs = 1000;
 
 %Dados de VELOCIDADE ANGULAR (mgraus/s -> graus/s)
-map_giro = 1/16.4;
+map_giro = 1/2097.2;
 map_accel = 1/16384 * 9.81 * 1000;
 Gx  = -(data1.Var5(1:end-1))*map_giro;
 Gy  = (data1.Var6(1:end-1))*map_giro;
@@ -36,8 +35,8 @@ Flag_laser_arduino = data1.Var1(1:end-1);
 % 
 % %Encontra a amostra da Flag do laser no arduino (trigger)
 [~,idx_Arduino] = max(abs(diff(Flag_laser_arduino)));   % `idx` is the sample **before** the jump
-
-
+% idx_Arduino = idx_Arduino + 1;
+idx_Arduino = idx_Arduino + 1;
 % 
 % %% =====================================================================%%
 % 
@@ -61,19 +60,32 @@ if (rms(Displacement_Z_cam) > 100)
     Displacement_Z_cam = Displacement_Z_cam / 1000; %passa para mm se estiver em microns
 end
 
+%Extrai o valor do trigger do nome do arquivo
+% Extrai o número usando expressão regular
+valor_str = regexp(filename, '(\d{1,4})\.csv$', 'tokens', 'once');
+
+% Converte para número (se encontrado)
+if ~isempty(valor_str)
+    idx_CAM = str2double(valor_str{1});
+else
+    idx_CAM = NaN; % Valor padrão se não encontrar
+    warning('Nenhum número encontrado antes de .csv');
+end
+
+disp(idx_CAM); % Exibe: 1246
+
 
 
 % %Encontra a amostra da Flag do laser na câmera
-[~,idx_CAM] = max(abs(diff(Flag_laser_cam)));   % `idx` is the sample **before** the jump
-%mesa_10hz e hexapod parado = 1297 (original 1298)
-%mesa_15hz e hexapod parado = 825 (original 826)
-%mesa_20hz e hexapod parado = 908 (original 925)
-%mesa_10hz e hexapod 10hz = 810 (original 810)
-%mesa_15hz e hexapod 15Hz = 803 (original 804)
-%mesa_20hz e hexapod 20hz = 814 (original 814)
-idx_CAM = 919;
-
-
+% [~,idx_CAM] = max(abs(diff(Flag_laser_cam)));   % `idx` is the sample **before** the jump
+% %mesa_10hz e hexapod parado = 1297 (original 1298)
+% %mesa_15hz e hexapod parado = 825 (original 826)
+% %mesa_20hz e hexapod parado = 908 (original 925)
+% %mesa_10hz e hexapod 10hz = 810 (original 810)
+% %mesa_15hz e hexapod 15Hz = 803 (original 804)
+% %mesa_20hz e hexapod 20hz = 814 (original 814)
+% idx_CAM = 1246;
+idx_CAM = idx_CAM + 1 - 2;
 
 %Pega o timestamp do sinal de deslocamento da câmera com base no trigger
 %usando o laser
@@ -123,28 +135,29 @@ A = (Displacement_Z_cam_filtrado_frame);
 B = (d_g_t_filtrado_frame);
 % B = (d_g_t_filtrado_frame);
 
-% Calcular correlação cruzada normalizada
-[corr_values, lags] = xcorr(A, B, 'coeff');
-
-[~, idx] = max((corr_values)); % Usar valor absoluto para considerar inversões de fase
-optimal_lag = lags(idx);
-
-if abs(optimal_lag) > 3
-
-    optimal_lag = 0;
-end
-
-
-if optimal_lag ~= 0
-    % B está atrasado: remover as primeiras `optimal_lag` amostras de B
-    A_aligned = detrend(Displacement_Z_cam_filtrado(idx_CAM+optimal_lag:end));
-    B_aligned = detrend(d_g_t_filtrado(idx_Arduino:idx_Arduino + length(A_aligned)-1));
-else
     A_aligned = A;
     B_aligned = B;
-end
 
-
+% Calcular correlação cruzada normalizada
+% [corr_values, lags] = xcorr(A, B, 'coeff');
+% 
+% [~, idx] = max((corr_values)); % Usar valor absoluto para considerar inversões de fase
+% optimal_lag = lags(idx);
+% 
+% if abs(optimal_lag) > 3
+% 
+%     optimal_lag = 0;
+% end
+% 
+% % optimal_lag = 0;
+% if optimal_lag ~= 0
+%     % B está atrasado: remover as primeiras `optimal_lag` amostras de B
+%     A_aligned = detrend(Displacement_Z_cam_filtrado(idx_CAM+optimal_lag:end));
+%     B_aligned = detrend(d_g_t_filtrado(idx_Arduino:idx_Arduino + length(A_aligned)-1));
+% else
+%     A_aligned = A;
+%     B_aligned = B;
+% end
 
 
 desloc_resultante_aux = A_aligned - B_aligned;
@@ -166,8 +179,8 @@ title('Câmera vs Deslocamento do Giro Projetado', 'FontSize', 16);
 grid on
 set(gca, 'FontSize', 12); % aumenta tamanho dos ticks dos eixos
 
-
-fftf_media(desloc_resultante_aux, Fs, 'acel', round(length(desloc_resultante_aux)/1));
+fftf_com_grafico(desloc_resultante_aux(1:2600), 1000, 'acel')
+% fftf_media(desloc_resultante_aux, Fs, 'acel', round(length(desloc_resultante_aux)/1));
 
 function [data] = readAndProcessCSV(fullpath)
     data = readtable(fullpath);
