@@ -20,7 +20,7 @@ dist_alvo = 6620 * 1; %em mm
 Fs = 1000;
 
 %Dados de VELOCIDADE ANGULAR (mgraus/s -> graus/s)
-map_giro = 1/2097.2 * 0.8;
+map_giro = 1/2097.2 * 0.85;
 map_accel = 1/16384 * 9.81 * 1000;
 Gx  = -(data1.Var5(1:end-1))*map_giro;
 Gy  = (data1.Var6(1:end-1))*map_giro;
