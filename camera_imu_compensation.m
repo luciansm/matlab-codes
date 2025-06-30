@@ -1,6 +1,32 @@
 clc; clear; close all;
 
-%Leitura dos dados do Labview (acelerômetro IEPE na tubulação e flag de ativação do laser)
+%% Ganhos e outras sintonias de testes=====================================
+gainIMU = 0.85;  %Ganho utilizado para multiplar o sinal da IMU. Depois é 
+                %necessário rever isso.
+
+
+%Distância ao alvo para calculo da projeção do movimento linear no plano de
+%imagem da câmera a partir dos movimentos angulares medidos pela IMU
+%localizada acima da câmera
+dist_alvo = 6640 * 1; %em mm
+Fs = 1000; %Frequência de amostragem da câmera e da ESP32
+
+
+%Filtro passa-banda para tirar DC e ruido de baixa frequência
+Fc1 = 1;     % frequência de corte inferior (Hz)
+Fc2 = 250;   % frequência de corte superior (Hz)
+[b1, a1] = butter(6, [Fc1 Fc2]/(Fs/2), 'bandpass');
+
+%Filtro passa-alta para tirar DC do sinal no tempo
+Fc1 = 1;     % frequência de corte inferior (Hz)
+[b2, a2] = butter(6, Fc1/(Fs/2), 'high');
+
+
+
+%% LEITURA DOS ARQUIVOS TXT E CSV DOS SINAIS DA IMU DA ESP32 E DOS SINAIS
+%DE DESLOCAMENTO DA CÂMERA IRIS MX
+
+%Leitura dos dados da IMU da esp32 (em cima da câmera)=====================
 [filename, pathname] = uigetfile({'*.txt', 'Arquivos CSV/TXT (*.csv)'; '*.*', 'Todos os arquivos (*.*)'}, 'Selecione o arquivo');
 
 % Verifica se o usuário cancelou a seleção de arquivo
@@ -13,33 +39,27 @@ end
 fullpath = fullfile(pathname, filename);
 
 % Lê e processa os dados do arquivo CSV
-[data1] = readAndProcessCSV(fullpath);
-
-%Distância ao alvo
-dist_alvo = 6620 * 1; %em mm
-Fs = 1000;
-
-%Dados de VELOCIDADE ANGULAR (mgraus/s -> graus/s)
-map_giro = 1/2097.2 * 0.85;
-map_accel = 1/16384 * 9.81 * 1000;
-Gx  = -(data1.Var5(1:end-1))*map_giro;
-Gy  = (data1.Var6(1:end-1))*map_giro;
-Gz  = (data1.Var7(1:end-1))*map_giro;
-
-Az  =   -(data1.Var4(1:end-1))*map_accel;
-% Gy  = detrend(data1.Var2(1:end-1))/1000;
-% Gz  = detrend(data1.Var3(1:end-1))/1000;
-Flag_laser_arduino = data1.Var1(1:end-1);
+[data1] = readtable(fullpath);
 
 
+% %Leitura dos dados da câmera (sujeita a vibração/sem correção)===========
+[filename1, pathname] = uigetfile({'*.csv', 'Arquivos CSV (*.csv)'; '*.*', 'Todos os arquivos (*.*)'}, 'Selecione o arquivo CSV');
 %
-% %Encontra a amostra da Flag do laser no arduino (trigger)
-[~,idx_Arduino] = max(abs(diff(Flag_laser_arduino)));   % `idx` is the sample **before** the jump
-% idx_Arduino = idx_Arduino + 1;
-idx_Arduino = idx_Arduino + 1;
+% Verifica se o usuário cancelou a seleção de arquivo
+if isequal(filename1, 0)
+    disp('Seleção de arquivo cancelada');
+    return;
+end
+
+% Caminho completo do arquivo
+fullpath = fullfile(pathname, filename1);
+% Lê e processa os dados do arquivo CSV
+[data2] = readtable(fullpath);
+Des_Y_cam = (data2.Var3);
+Des_Z_cam = (data2.Var5);
 
 
-% %Leitura dos dados da câmera
+% %Leitura dos dados da câmera SEM VIBRAÇÃO NA BASE (MESA PARADA)==========
 [filename, pathname] = uigetfile({'*.csv', 'Arquivos CSV (*.csv)'; '*.*', 'Todos os arquivos (*.*)'}, 'Selecione o arquivo CSV');
 %
 % Verifica se o usuário cancelou a seleção de arquivo
@@ -51,17 +71,29 @@ end
 % Caminho completo do arquivo
 fullpath = fullfile(pathname, filename);
 % Lê e processa os dados do arquivo CSV
-[data2] = readAndProcessCSV(fullpath);
-Displacement_Z_cam = (data2.Var5);
-% Flag_laser_cam = data2.Var8;
+[data3] = readtable(fullpath);
+Des_Z_cam_base_parada = (data3.Var5);
 
-% if (rms(Displacement_Z_cam) > 100)
-Displacement_Z_cam = Displacement_Z_cam / 1000; %passa para mm se estiver em microns
-% end
+if (max(Des_Z_cam_base_parada) > 70)
+Des_Z_cam_base_parada = Des_Z_cam_base_parada / 1000; %passa para mm se estiver em microns
+end
 
-%Extrai o valor do trigger do nome do arquivo
-% Extrai o número usando expressão regular
-valor_str = regexp(filename, '(\d{1,4})\.csv$', 'tokens', 'once');
+
+%Aqui é uma verificação se os dados fornecidos pela câmera estão em microns
+%ou mm. Se estiver acima do valor de 70, provavelmente estão em microns,
+%portanto divide-se por 1000 para passar para mm.
+if (max(Des_Z_cam) > 70)
+Des_Z_cam = Des_Z_cam / 1000; %passa para mm se estiver em microns
+end
+
+%% OBTENÇÃO DO INSTANTE EM QUE O LASER É ATIVADO E AJUSTE DOS VETORES DOS
+%SINAIS A SEREM PROCESSADOS
+
+%Extrai a amostra do momento que a câmera identificou o laser do nome do
+%arquivo dos sinais de deslocamento da câmera. O valor da amostra está
+%sendo colocado manualmente no fim do nome do arquivo de modo a facilitar a
+%identificação pelo programa de processamento
+valor_str = regexp(filename1, '(\d{1,4})\.csv$', 'tokens', 'once');
 
 % Converte para número (se encontrado)
 if ~isempty(valor_str)
@@ -71,72 +103,104 @@ else
     warning('Nenhum número encontrado antes de .csv');
 end
 
-disp(idx_CAM);
+%Sinal do trigger do laser para identificação do instante de ativação NA
+%ESP32
+Flag_laser_ESP32 = data1.Var1(1:end-1);
 
+% %Encontra a amostra da Flag do laser no ESP32 (trigger)
+[~,idx_ESP32] = max(abs(diff(Flag_laser_ESP32)));   % `idx` is the sample **before** the jump
 
+%Corrige a amostra do trigger da ESP32
+idx_ESP32 = idx_ESP32 + 1; 
 
-% %Encontra a amostra da Flag do laser na câmera
+%Corrige a amostra do trigger da câmera
 idx_CAM = idx_CAM + 1;
 
-%Pega o timestamp do sinal de deslocamento da câmera com base no trigger
-%usando o laser
-Displacement_Z_cam_frame = (Displacement_Z_cam(idx_CAM:end));
-
-%Pega o timestamp do sinal do giroscópio com base no trigger usando o laser
-Gx_frame = Gx(idx_Arduino:idx_Arduino + length(Displacement_Z_cam_frame)-1);
+%Define a primeira amostrar a pegar da IMU da ESP32
+amostraInicial = idx_ESP32   - idx_CAM;
+amostraFinal =   idx_ESP32   - idx_CAM - 1 + length(Des_Z_cam);
 
 
+%Mapeamento dos dados digitais de vel. angular e aceleração para graus/s e
+%mm/s²
 
-%Pega o timestamp do sinal do acelerometro com base no trigger usando o laser
-Az_frame = Az(idx_Arduino:idx_Arduino + length(Displacement_Z_cam_frame)-1);
+% SINAIS DE VELOCIDADE ANGULAR NOS 3 EIXOS (IMU)
+%Detalhe, estou multiplicando o map_giro por um ganho para melhorar a
+%estimação da correção. Verificar isso depois
+map_giro = 1/2097.2 * gainIMU;
+map_accel = 1/16384 * 9.81 * 1000 * gainIMU;
+Gx  = -(data1.Var5(1:end-1))*map_giro;
+Gy  = (data1.Var6(1:end-1))*map_giro;
+Gz  = (data1.Var7(1:end-1))*map_giro;
 
 
-%% --- FFT complexa do Gx e Az -------------------------
-Gx_rad   = Gx * pi/180;            % convert to rad s⁻¹ ; keep sign!
+% SINAIS DE ACELERAÇÃO NOS 3 EIXOS (IMU)
+Az  =  -(data1.Var4(1:end-1))*map_accel;
+Ay  =   (data1.Var3(1:end-1))*map_accel;
+Ax  =   (data1.Var2(1:end-1))*map_accel;
+
+
+%% Filtrando os sinais antes das integrações===============================
+Gx_filt = filtfilt(b1,a1,Gx);
+Gy_filt = filtfilt(b1,a1,Gy);
+Gz_filt = filtfilt(b1,a1,Gz);
+
+Ax_filt = filtfilt(b1,a1,Ax);
+Ay_filt = filtfilt(b1,a1,Ay);
+Az_filt = filtfilt(b1,a1,Az);
+
+
+
+% %Pega o timestamp do sinal do giroscópio com base no trigger usando o laser
+% Gx_frame = Gx_filt(amostraInicial:amostraFinal);
+% Gy_frame = Gy_filt(amostraInicial:amostraFinal);
+% Gz_frame = Gz_filt(amostraInicial:amostraFinal);
+% 
+% %Pega o timestamp do sinal do acelerometro com base no trigger usando o laser
+% Ax_frame = Ax_filt(amostraInicial:amostraFinal);
+% Ay_frame = Ay_filt(amostraInicial:amostraFinal);
+% Az_frame = Az_filt(amostraInicial:amostraFinal);
+
+
+
+%% ABAIXO É REALIZADA A PASSAGEM DE VELOCIDADE ANGULAR PARA DESLOCAMENTO 
+%ANGULAR E DE ACELERAÇÃO LINEAR PARA DESLOCAMENTO LINEAR. TUDO É FEITO NO
+%DOMINIO DA FREQUÊNCIA
+
+% --- FFT complexa DA VEL. ANGULAR E ACELERAÇÃO- -------------------------
+Gx_rad   = Gx_filt * pi/180;            % convert to rad s⁻¹ ; keep sign!
 Gx_rad = Gx_rad';
-Theta = processa_sinal_freq(Gx_rad, 1000, 'integrar');
-d_g_t = dist_alvo * Theta;
+Theta = processa_sinal_freq(Gx_rad, Fs, 'integrar');
 
-Az = Az';
-Dz_acel = processa_sinal_freq(Az, 1000, 'integrar2');
+%Multiplica o ângulo pela distância que a câmera está do alvo. O certo seria
+%utilizar Tg(theta), mas para pequenos ângulos Tg(theta) ~ theta
+Des_linear_projetado_Gx = dist_alvo * Theta;
 
-
-%Filtro passa-banda entre 4 Hz e 120 Hz
-Fc1 = 4;     % frequência de corte inferior (Hz)
-Fc2 = 20;   % frequência de corte superior (Hz)
-Wn = [Fc1 Fc2]/(Fs/2);  % Normaliza para Nyquist
-[b, a] = butter(1, Wn, 'bandpass');  % Filtro de 2ª ordem passa-banda
-
-% 2. Aplicação do filtro com fase nula
-d_g_t_filtrado = filtfilt(b, a, d_g_t);
-Dz_acel_filtrado = filtfilt(b, a, Dz_acel);
+Az_filt = Az_filt';
+Des_linear_Az = processa_sinal_freq(Az_filt, Fs, 'integrar2');
 
 
-d_g_t_frame = d_g_t(idx_Arduino:idx_Arduino + length(Displacement_Z_cam_frame)-1);
-Displacement_Z_cam_filtrado = filtfilt(b, a, Displacement_Z_cam);
-Displacement_Z_cam_filtrado_frame = Displacement_Z_cam_filtrado(idx_CAM:end)';
-d_g_t_filtrado_frame = (d_g_t_filtrado(idx_Arduino:idx_Arduino + length(Displacement_Z_cam_frame)-1));
-Dz_acel_filtrado_frame = (Dz_acel_filtrado(idx_Arduino:idx_Arduino + length(Displacement_Z_cam_frame)-1));
+% 2. Aplicação do filtro com fase nula nos sinais da IMU e da câmera
+Des_Z_cam = Des_Z_cam';
+Des_linear_projetado_Gx_filtrado_frame = (Des_linear_projetado_Gx(amostraInicial:amostraFinal));
+Des_linear_Az_filtrado_frame = (Des_linear_Az(amostraInicial:amostraFinal));
+
+%Calcula o deslocamento resultante em Z (correção do sinal de vibração da
+%câmera)
+Des_resultante_Z = filtfilt(b2,a2,Des_Z_cam)' - filtfilt(b2,a2,Des_linear_projetado_Gx_filtrado_frame)' - filtfilt(b2,a2,Des_linear_Az_filtrado_frame') ;
+
+%% Avaliando sina no tempo=================================================
+
+% Aqui é passado um filtro passa-altas para tirar a componente DC dos
+% sinais
 
 
-% Carregar ou definir os vetores
-A = (Displacement_Z_cam_filtrado_frame);
-B = (d_g_t_filtrado_frame);
-C = (Dz_acel_filtrado_frame);
-A_aligned = A;
-B_aligned = B;
-C_aligned = C;
-% B_aligned = 0
 
-
-desloc_resultante_aux = A_aligned' - B_aligned' - C_aligned' ;
-
-%% ------------------------- visualisation --------------------------------
 figure
-plot(A_aligned, 'k', 'LineWidth', 2); hold on
-plot(B_aligned, '-.r', 'LineWidth', 2);
-plot(desloc_resultante_aux, 'b', 'LineWidth', 2);
-plot(C_aligned', 'm','LineWidth', 2);
+plot(filtfilt(b2,a2,Des_Z_cam), 'k', 'LineWidth', 2); hold on
+plot(filtfilt(b2,a2,Des_linear_projetado_Gx_filtrado_frame), '-.r', 'LineWidth', 2);
+plot(filtfilt(b2,a2,Des_resultante_Z), 'b', 'LineWidth', 2);
+plot(filtfilt(b2,a2,Des_linear_Az_filtrado_frame'), 'm','LineWidth', 2);
 
 
 legend({'Câmera (mm)', 'Giro → Proj (mm)', 'Residual (mm)','Deslocamento em z (Accel)'}, ...
@@ -156,28 +220,29 @@ set(gca, 'FontSize', 12); % aumenta tamanho dos ticks dos eixos
 
 
 
-% %Leitura dos dados da câmera SEM VIBRAÇÃO NA BASE
-[filename, pathname] = uigetfile({'*.csv', 'Arquivos CSV (*.csv)'; '*.*', 'Todos os arquivos (*.*)'}, 'Selecione o arquivo CSV');
-%
-% Verifica se o usuário cancelou a seleção de arquivo
-if isequal(filename, 0)
-    disp('Seleção de arquivo cancelada');
-    return;
-end
 
-% Caminho completo do arquivo
-fullpath = fullfile(pathname, filename);
-% Lê e processa os dados do arquivo CSV
-[data3] = readAndProcessCSV(fullpath);
-Displacement_Z_cam_base_parada = (data3.Var5);
-Displacement_Z_cam_base_parada = Displacement_Z_cam_base_parada / 1000; %passa para mm se estiver em microns
-Displacement_Z_cam_base_parada_filtrada = filtfilt(b, a, Displacement_Z_cam_base_parada);
-Displacement_Z_cam_base_parada_filtrada_frame  = Displacement_Z_cam_base_parada_filtrada(idx_CAM:end);
+%Tamanho do vetor a ser processado para tirar o espectro
+vector_size = 2500;
 
-% Espectro de deslocamento
-[mag_compensado, freq_compensado] = fftf_sem_grafico(desloc_resultante_aux(1:3000)', 1000, 'acel');
-[mag_camera, freq_camera] = fftf_sem_grafico(Displacement_Z_cam_filtrado_frame(1:3000)', 1000, 'acel');
-[mag_camera_parada, freq_camera_parada] = fftf_sem_grafico(Displacement_Z_cam_base_parada_filtrada_frame(1:3000)', 1000, 'acel');
+%% Bins candidatos a correção
+[mag_giro, freq_giro] = frequency_derivative_integration3(Des_linear_projetado_Gx_filtrado_frame(1:vector_size)', Fs, 'nada','true');
+[mag_accel, freq_accel] = frequency_derivative_integration3(Des_linear_Az_filtrado_frame(1:vector_size)', Fs, 'nada','true');
+
+figure
+loglog(freq_giro, mag_giro, 'LineWidth', 1.5, 'DisplayName', 'Deslocamento causado pelo GIRO');
+hold on
+loglog(freq_accel, mag_accel, 'LineWidth', 1.5, 'DisplayName', 'Deslocamento medido pela câmera');
+xlabel('Frequência (Hz)', 'FontSize', 12)
+ylabel('Deslocamento (mm)', 'FontSize', 12)
+title('Bins candidatos a correção', 'FontSize', 12)
+grid on;
+
+
+
+%% Espectro de deslocamento=================================================
+[mag_compensado, freq_compensado] = frequency_derivative_integration3(Des_resultante_Z(1:vector_size)', Fs, 'nada','true');
+[mag_camera, freq_camera] = frequency_derivative_integration3(Des_Z_cam(1:vector_size)', Fs, 'nada','true');
+[mag_camera_parada, freq_camera_parada] = frequency_derivative_integration3(Des_Z_cam_base_parada(1:vector_size)', Fs, 'nada','true');
 
 figure
 loglog(freq_compensado, mag_compensado, 'LineWidth', 1.5, 'DisplayName', 'Deslocamento do alvo (compensado)');
@@ -195,11 +260,10 @@ legend boxon
 
 
 
-
-% Espectro de velocidade
-[mag_compensado, freq_compensado]       = frequency_derivative_integration(desloc_resultante_aux(1:3000), 1000, 'derivar');
-[mag_camera, freq_camera]               = frequency_derivative_integration(Displacement_Z_cam_filtrado_frame(1:3000), 1000, 'derivar');
-[mag_camera_parada, freq_camera_parada] = frequency_derivative_integration(Displacement_Z_cam_base_parada_filtrada_frame(1:3000), 1000, 'derivar');
+% Espectro de velocidade==================================================
+[mag_compensado, freq_compensado]       = frequency_derivative_integration3(Des_resultante_Z(1:vector_size)', Fs, 'derivar','true');
+[mag_camera, freq_camera]               = frequency_derivative_integration3(Des_Z_cam(1:vector_size)', Fs, 'derivar','true');
+[mag_camera_parada, freq_camera_parada] = frequency_derivative_integration3(Des_Z_cam_base_parada(1:vector_size)', Fs, 'derivar','true');
 
 figure
 loglog(freq_compensado, mag_compensado, 'LineWidth', 1.5, 'DisplayName', 'Velocidade do alvo (compensado)');
@@ -215,11 +279,3 @@ title('Espectro de Velocidade', 'FontSize', 12)
 legend('Location', 'best')
 legend boxon
 
-
-
-% fftf_com_grafico(desloc_resultante_aux(1:2000)', 1000, 'acel')
-% fftf_media(desloc_resultante_aux, Fs, 'acel', round(length(desloc_resultante_aux)/1));
-
-function [data] = readAndProcessCSV(fullpath)
-data = readtable(fullpath);
-end
