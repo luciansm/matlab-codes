@@ -1,55 +1,71 @@
 function y = integrateFreqDomain(x, Fs, order)
-%INTEGRATEFREQDOMAIN Integrate (or double-integrate) a time-series via FFT.
+%INTEGRATEFREQDOMAIN Integrate or Derivate a time-series via FFT.
 %
-%   y = integrateFreqDomain(x, Fs)           % one integration
-%   y = integrateFreqDomain(x, Fs, order)    % 'order' = 1 (vel) or 2 (disp)
+%   y = integrateFreqDomain(x, Fs)              % default is 1st integration
+%   y = integrateFreqDomain(x, Fs, order)       % order: -2 to +2
 %
 % INPUTS
 %   x     – column- or row-vector with N samples of the signal in the time domain
 %   Fs    – sampling rate  [Hz]
-%   order – 1 →  ∫ x dt  (default)      (e.g. acc → vel)
-%            2 → ∬ x dt² (double int.)  (e.g. acc → disp)
+%   order – -2 → d²x/dt² (2nd deriv.)
+%           -1 → dx/dt    (1st deriv.)
+%            0 → x        (no operation)
+%           +1 → ∫ x dt   (1st integ.)
+%           +2 → ∬ x dt²  (2nd integ.)
 %
 % OUTPUT
-%   y  – integrated signal (same size & orientation as x)
+%   y  – transformed signal (same size & orientation as x)
 %
-% NOTES
-% • Integration constant is forced to zero by setting the DC bin to 0.
-% • No additional filtering is applied; if your signal contains low-frequency
-%   drift you might want to high-pass x before calling this function.
-% • Works for both real and complex inputs.
-%
-% Lucian & Bruna – Jun-2025
+% Lucian – Jun-2025
 % -------------------------------------------------------------------------
 
     if nargin < 3,  order = 1;  end
-    if order ~= 1 && order ~= 2
-        error('order must be 1 (single) or 2 (double) integration.');
+    if ~ismember(order, -2:2)
+        error('order must be -2, -1, 0, +1, or +2.');
     end
 
     % --- FFT & frequency axis ------------------------------------------------
     x  = x(:);                    % force column for internal math
     N  = numel(x);
-    X  = fft(x);                  % complex spectrum, 0…N-1
-    k  = (0:N-1).';               % integer bins
+    X  = fft(x);                  % complex spectrum
+    f  = (0:N-1).' * Fs / N;      % raw frequency bins [0, Fs)
+    w  = 2*pi*(f - (f >= Fs/2)*Fs); % centered in 0, signed frequency (rad/s)
 
-    % Build symmetric frequency vector f = [0 … +Fs/2 … -Fs/2 … -Fs/N]*Hz
-    f  = (k - (k >= N/2).*N) * Fs / N;      % Hz
-    w  = 2*pi*f;                             % rad/s  (signed!)
+    % Avoid division by zero at DC
+    w_nozero = w;
+    w_nozero(w == 0) = Inf;
 
-    % --- Integrate in the frequency domain ----------------------------------
-    w(w==0) = Inf;     % avoid division by zero at DC
+    % --- Frequency-domain transformation -------------------------------------
     switch order
+        case 0
+            Xout = X;
         case 1
-            Xint          =  X ./ (1j*w);      % single integration
+            Xout = X ./ (1j*w_nozero);     % single integration
         case 2
-            Xint          =  X ./ (-(w.^2));   % double integration
+            Xout = X ./ (-(w_nozero.^2));  % double integration
+        case -1
+            Xout = 1j*w .* X;              % single derivative
+        case -2
+            Xout = -(w.^2) .* X;           % double derivative
     end
-    Xint(w == Inf) = 0;  % force zero DC component (integration constant)
+
+    % Force zero DC component for integration
+    if order > 0
+        Xout(w == 0) = 0;
+    end
 
     % --- IFFT back to time ---------------------------------------------------
-    y  = real(ifft(Xint));
-
-    % restore original orientation
+    y  = real(ifft(Xout));
     if isrow(x),  y = y.';  end
+
+    % --- PLOT: Positive Frequency Spectrum (linear) --------------------------
+    N_half = floor(N/2) + 1;      % includes DC and Nyquist if even
+    f_pos  = f(1:N_half);
+    magXout = 2 * abs(Xout(1:N_half)) / N;
+
+    figure;
+    loglog(f_pos, magXout, 'LineWidth', 1.2);
+    grid on; xlabel('Frequency [Hz]'); ylabel('Magnitude');
+    title('Espectro');
+    legend('Velocidade');
 end
